@@ -6,104 +6,268 @@
 #[cfg(feature = "std")]
 include!(concat!(env!("OUT_DIR"), "/wasm_binary.rs"));
 
-use frame_support::dispatch::DispatchClass;
-use frame_system::{
-	limits::{BlockLength, BlockWeights},
-	EnsureSigned,
-};
+mod weights;
+pub mod zenlink;
+use crate::zenlink::*;
+
+use xcm::v3::MultiLocation;
+use zenlink_protocol::{AssetBalance, MultiAssetsHandler, PairInfo};
+
+use bifrost_farming as farming;
+use bifrost_farming_rpc_runtime_api as farming_rpc_runtime_api;
+use orml_traits::MultiCurrency;
+
+use codec::Encode;
+
+use smallvec::smallvec;
 use sp_api::impl_runtime_apis;
-use sp_core::{crypto::KeyTypeId, OpaqueMetadata};
+use sp_core::{crypto::KeyTypeId, OpaqueMetadata, H256};
 use sp_runtime::{
 	create_runtime_str, generic, impl_opaque_keys,
-	traits::{AccountIdLookup, BlakeTwo256, Block as BlockT, IdentifyAccount, Verify},
+	traits::{
+		AccountIdConversion, AccountIdLookup, BlakeTwo256, Block as BlockT, Convert, ConvertInto,
+	},
 	transaction_validity::{TransactionSource, TransactionValidity},
-	ApplyExtrinsicResult, MultiSignature,
+	ApplyExtrinsicResult, DispatchError, FixedPointNumber, SaturatedConversion,
 };
-use sp_std::prelude::*;
+
+use sp_std::{marker::PhantomData, prelude::*};
 #[cfg(feature = "std")]
 use sp_version::NativeVersion;
 use sp_version::RuntimeVersion;
 
-// A few exports that help ease life for downstream crates.
-pub use frame_support::{
-	construct_runtime, parameter_types,
+use frame_support::{
+	construct_runtime,
+	dispatch::DispatchClass,
+	parameter_types,
 	traits::{
-		AsEnsureOriginWithArg, ConstBool, ConstU128, ConstU32, ConstU8, KeyOwnerProofSystem,
-		Randomness, StorageInfo,
+		ConstBool, ConstU128, ConstU32, Contains, Currency as FrameCurrency, EitherOfDiverse,
+		EqualPrivilegeOnly, Imbalance, OnUnbalanced, WithdrawReasons,
 	},
 	weights::{
-		constants::{
-			BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight, WEIGHT_REF_TIME_PER_SECOND,
-		},
-		IdentityFee, Weight,
+		constants::WEIGHT_REF_TIME_PER_SECOND, ConstantMultiplier, Weight, WeightToFeeCoefficient,
+		WeightToFeeCoefficients, WeightToFeePolynomial,
 	},
-	StorageValue,
+	PalletId,
 };
+
 pub use frame_system::Call as SystemCall;
 pub use pallet_balances::Call as BalancesCall;
 pub use pallet_timestamp::Call as TimestampCall;
 use pallet_transaction_payment::CurrencyAdapter;
+
+use frame_system::{
+	limits::{BlockLength, BlockWeights},
+	EnsureRoot, EnsureSigned,
+};
+pub use sp_runtime::{MultiAddress, Perbill, Permill, Perquintill};
+
+use runtime_common::{
+	asset_registry, chain_ext, opaque, AccountId, Amount, Balance, BlockNumber, Hash, Index,
+	PoolId, ReserveIdentifier, Signature, EXISTENTIAL_DEPOSIT, MILLIUNIT, NANOUNIT, UNIT,
+};
+
+use dia_oracle::DiaOracle;
+
+use orml_currencies::BasicCurrencyAdapter;
+use orml_traits::{currency::MutationHooks, parameter_type_with_key};
+
 #[cfg(any(feature = "std", test))]
 pub use sp_runtime::BuildStorage;
-pub use sp_runtime::{Perbill, Permill};
 
-/// An index to a block.
-pub type BlockNumber = u32;
+pub use dia_oracle::dia::AssetId;
+pub use issue::{Event as IssueEvent, IssueRequest};
+pub use nomination::Event as NominationEvent;
+pub use redeem::{Event as RedeemEvent, RedeemRequest};
+pub use replace::{Event as ReplaceEvent, ReplaceRequest};
+pub use security::StatusCode;
+pub use stellar_relay::traits::{FieldLength, Organization, Validator};
 
-/// Alias to 512-bit hash when used in the context of a transaction signature on the chain.
-pub type Signature = MultiSignature;
+pub use module_oracle_rpc_runtime_api::BalanceWrapper;
+use oracle::dia::{DiaOracleAdapter, XCMCurrencyConversion};
 
-/// Some way of identifying an account on the chain. We intentionally make it equivalent
-/// to the public key of our transaction signing scheme.
-pub type AccountId = <<Signature as Verify>::Signer as IdentifyAccount>::AccountId;
+// Polkadot imports
+use polkadot_runtime_common::{BlockHashCount, SlowAdjustingFeeUpdate};
 
-/// Balance of an account.
-pub type Balance = u128;
+use spacewalk_primitives::{
+	self as primitives, CurrencyId, CurrencyId::XCM, Moment, SignedFixedPoint, SignedInner,
+	UnsignedFixedPoint, UnsignedInner,
+};
 
-/// Index of a transaction in the chain.
-pub type Index = u32;
+use orml_currencies::WeightInfo;
+use weights::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight};
 
-/// A hash of some data used by the chain.
-pub type Hash = sp_core::H256;
+use orml_currencies_allowance_extension::{
+	default_weights::WeightInfo as AllowanceWeightInfo, Config as AllowanceConfig,
+};
 
-/// Opaque types. These are used by the CLI to instantiate machinery that don't need to know
-/// the specifics of the runtime. They can then be made to be agnostic over specific formats
-/// of data like extrinsics, allowing for them to continue syncing the network through upgrades
-/// to even the core data structures.
-pub mod opaque {
-	use super::*;
+use frame_support::{
+	log::{error, warn},
+	pallet_prelude::*,
+};
+use sp_std::vec::Vec;
 
-	pub use sp_runtime::OpaqueExtrinsic as UncheckedExtrinsic;
+use pallet_contracts::chain_extension::{
+	ChainExtension, Environment, Ext, InitState, RetVal, SysConfig,
+};
+use sp_core::crypto::UncheckedFrom;
 
-	/// Opaque block header type.
-	pub type Header = generic::Header<BlockNumber, BlakeTwo256>;
-	/// Opaque block type.
-	pub type Block = generic::Block<Header, UncheckedExtrinsic>;
-	/// Opaque block identifier type.
-	pub type BlockId = generic::BlockId<Block>;
+pub type VaultId = primitives::VaultId<AccountId, CurrencyId>;
+/// The address format for describing accounts.
+pub type Address = MultiAddress<AccountId, ()>;
+/// Block header type as expected by this runtime.
+pub type Header = generic::Header<BlockNumber, BlakeTwo256>;
+/// Block type as expected by this runtime.
+pub type Block = generic::Block<Header, UncheckedExtrinsic>;
+/// The SignedExtension to the basic transaction logic.
+pub type SignedExtra = (
+	frame_system::CheckNonZeroSender<Runtime>,
+	frame_system::CheckSpecVersion<Runtime>,
+	frame_system::CheckTxVersion<Runtime>,
+	frame_system::CheckGenesis<Runtime>,
+	frame_system::CheckEra<Runtime>,
+	frame_system::CheckNonce<Runtime>,
+	frame_system::CheckWeight<Runtime>,
+	pallet_transaction_payment::ChargeTransactionPayment<Runtime>,
+);
+/// The payload being signed in transactions.
+pub type SignedPayload = generic::SignedPayload<RuntimeCall, SignedExtra>;
+/// Unchecked extrinsic type as expected by this runtime.
+pub type UncheckedExtrinsic =
+	generic::UncheckedExtrinsic<Address, RuntimeCall, Signature, SignedExtra>;
+/// Executive: handles dispatch to the various modules.
+pub type Executive = frame_executive::Executive<
+	Runtime,
+	Block,
+	frame_system::ChainContext<Runtime>,
+	Runtime,
+	AllPalletsWithSystem,
+	pallet_contracts::Migration<Runtime>,
+>;
 
-	impl_opaque_keys! {
-		pub struct SessionKeys {}
+pub struct SpacewalkNativeCurrency;
+impl oracle::dia::NativeCurrencyKey for SpacewalkNativeCurrency {
+	fn native_symbol() -> Vec<u8> {
+		"AMPE".as_bytes().to_vec()
+	}
+
+	fn native_chain() -> Vec<u8> {
+		"AMPLITUDE".as_bytes().to_vec()
 	}
 }
+
+impl XCMCurrencyConversion for SpacewalkNativeCurrency {
+	fn convert_to_dia_currency_id(token_symbol: u8) -> Option<(Vec<u8>, Vec<u8>)> {
+		match token_symbol {
+			0 => Some((b"Kusama".to_vec(), b"KSM".to_vec())),
+			_ => None,
+		}
+	}
+
+	fn convert_from_dia_currency_id(blockchain: Vec<u8>, symbol: Vec<u8>) -> Option<u8> {
+		match (blockchain.as_slice(), symbol.as_slice()) {
+			(b"Kusama", b"KSM") => Some(0),
+			_ => None,
+		}
+	}
+}
+
+type DataProviderImpl = DiaOracleAdapter<
+	DiaOracleModule,
+	UnsignedFixedPoint,
+	Moment,
+	oracle::dia::DiaOracleKeyConvertor<SpacewalkNativeCurrency>,
+	ConvertPrice,
+	ConvertMoment,
+>;
+
+pub struct ConvertPrice;
+impl Convert<u128, Option<UnsignedFixedPoint>> for ConvertPrice {
+	fn convert(price: u128) -> Option<UnsignedFixedPoint> {
+		Some(UnsignedFixedPoint::from_inner(price))
+	}
+}
+
+pub struct ConvertMoment;
+impl Convert<u64, Option<Moment>> for ConvertMoment {
+	fn convert(moment: u64) -> Option<Moment> {
+		// The provided moment is in seconds, but we need milliseconds
+		Some(moment.saturating_mul(1000))
+	}
+}
+
+/// Handles converting a weight scalar to a fee value, based on the scale and granularity of the
+/// node's balance type.
+///
+/// This should typically create a mapping between the following ranges:
+///   - `[0, MAXIMUM_BLOCK_WEIGHT]`
+///   - `[Balance::min, Balance::max]`
+///
+/// Yet, it can be used for any other sort of change to weight-fee. Some examples being:
+///   - Setting it to `0` will essentially disable the weight fee.
+///   - Setting it to `1` will cause the literal `#[weight = x]` values to be charged.
+pub struct WeightToFee;
+impl WeightToFeePolynomial for WeightToFee {
+	type Balance = Balance;
+	fn polynomial() -> WeightToFeeCoefficients<Self::Balance> {
+		let p = MILLIUNIT;
+		let q = 10 * Balance::from(ExtrinsicBaseWeight::get().ref_time());
+		smallvec![WeightToFeeCoefficient {
+			degree: 1,
+			negative: false,
+			coeff_frac: Perbill::from_rational(p % q, q),
+			coeff_integer: p / q,
+		}]
+	}
+}
+
+impl_opaque_keys! {
+	pub struct SessionKeys {}
+}
+
 // To learn more about runtime versioning, see:
 // https://docs.substrate.io/main-docs/build/upgrade#runtime-versioning
 #[sp_version::runtime_version]
 pub const VERSION: RuntimeVersion = RuntimeVersion {
-	spec_name: create_runtime_str!("substrate-contracts-node"),
-	impl_name: create_runtime_str!("substrate-contracts-node"),
+	spec_name: create_runtime_str!("foucoco-standalone"),
+	impl_name: create_runtime_str!("foucoco-standalone"),
 	authoring_version: 1,
-	// The version of the runtime specification. A full node will not attempt to use its native
-	//   runtime in substitute for the on-chain Wasm runtime unless all of `spec_name`,
-	//   `spec_version`, and `authoring_version` are the same between Wasm and native.
-	// This value is set to 100 to notify Polkadot-JS App (https://polkadot.js.org/apps) to use
-	//   the compatible custom types.
-	spec_version: 100,
+	spec_version: 1,
 	impl_version: 1,
 	apis: RUNTIME_API_VERSIONS,
 	transaction_version: 1,
 	state_version: 1,
 };
+
+// This determines the average expected block time that we are targeting.
+/// Blocks will be produced at a minimum duration defined by `SLOT_DURATION`.
+/// `SLOT_DURATION` is picked up by `pallet_timestamp` which is in turn picked
+/// up by `pallet_aura` to implement `fn slot_duration()`.
+///
+/// Change this to adjust the block time.
+pub const MILLISECS_PER_BLOCK: u64 = 12000;
+
+// NOTE: Currently it is not possible to change the slot duration after the chain has started.
+//       Attempting to do so will brick block production.
+pub const SLOT_DURATION: u64 = MILLISECS_PER_BLOCK;
+
+// Time is measured by number of blocks.
+pub const MINUTES: BlockNumber = 60_000 / (MILLISECS_PER_BLOCK as BlockNumber);
+pub const HOURS: BlockNumber = MINUTES * 60;
+pub const DAYS: BlockNumber = HOURS * 24;
+pub const BLOCKS_PER_YEAR: BlockNumber = DAYS * 36525 / 100;
+
+/// We assume that ~5% of the block weight is consumed by `on_initialize` handlers. This is
+/// used to limit the maximal weight of a single extrinsic.
+const AVERAGE_ON_INITIALIZE_RATIO: Perbill = Perbill::from_percent(10);
+
+/// We allow `Normal` extrinsics to fill up the block up to 75%, the rest can be used by
+/// `Operational` extrinsics.
+const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
+
+/// We allow for 2 seconds of compute with a 6 second average block time, with maximum proof size.
+const MAXIMUM_BLOCK_WEIGHT: Weight =
+	Weight::from_parts(WEIGHT_REF_TIME_PER_SECOND.saturating_mul(2), u64::MAX);
 
 /// The version information used to identify this runtime when compiled natively.
 #[cfg(feature = "std")]
@@ -111,43 +275,11 @@ pub fn native_version() -> NativeVersion {
 	NativeVersion { runtime_version: VERSION, can_author_with: Default::default() }
 }
 
-const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
-
-/// We assume that ~10% of the block weight is consumed by `on_initialize` handlers.
-/// This is used to limit the maximal weight of a single extrinsic.
-const AVERAGE_ON_INITIALIZE_RATIO: Perbill = Perbill::from_percent(10);
-
-/// We allow for 2 seconds of compute with a 6 second average block time, with maximum proof size.
-const MAXIMUM_BLOCK_WEIGHT: Weight =
-	Weight::from_parts(WEIGHT_REF_TIME_PER_SECOND.saturating_mul(2), u64::MAX);
-
 // Prints debug output of the `contracts` pallet to stdout if the node is
 // started with `-lruntime::contracts=debug`.
 const CONTRACTS_DEBUG_OUTPUT: bool = true;
 
-// Unit = the base number of indivisible units for balances
-const UNIT: Balance = 1_000_000_000_000;
-const MILLIUNIT: Balance = 1_000_000_000;
-pub const EXISTENTIAL_DEPOSIT: Balance = MILLIUNIT;
-
-const fn deposit(items: u32, bytes: u32) -> Balance {
-	(items as Balance * UNIT + (bytes as Balance) * (5 * MILLIUNIT / 100)) / 10
-}
-
-fn schedule<T: pallet_contracts::Config>() -> pallet_contracts::Schedule<T> {
-	pallet_contracts::Schedule {
-		limits: pallet_contracts::Limits {
-			runtime_memory: 1024 * 1024 * 1024,
-			..Default::default()
-		},
-		..Default::default()
-	}
-}
-
-impl pallet_insecure_randomness_collective_flip::Config for Runtime {}
-
 parameter_types! {
-	pub const BlockHashCount: BlockNumber = 2400;
 	pub const Version: RuntimeVersion = VERSION;
 
 	// This part is copied from Substrate's `bin/node/runtime/src/lib.rs`.
@@ -175,14 +307,59 @@ parameter_types! {
 		.avg_block_initialization(AVERAGE_ON_INITIALIZE_RATIO)
 		.build_or_panic();
 
-	pub const SS58Prefix: u8 = 42;
+	pub const SS58Prefix: u8 = 57;
+}
+
+pub struct BaseFilter;
+impl Contains<RuntimeCall> for BaseFilter {
+	fn contains(call: &RuntimeCall) -> bool {
+		match call {
+			// These modules are all allowed to be called by transactions:
+			RuntimeCall::Bounties(_)
+			| RuntimeCall::ChildBounties(_)
+			| RuntimeCall::Treasury(_)
+			| RuntimeCall::Tokens(_)
+			| RuntimeCall::Currencies(_)
+			| RuntimeCall::Democracy(_)
+			| RuntimeCall::Council(_)
+			| RuntimeCall::TechnicalCommittee(_)
+			| RuntimeCall::System(_)
+			| RuntimeCall::Scheduler(_)
+			| RuntimeCall::Preimage(_)
+			| RuntimeCall::Timestamp(_)
+			| RuntimeCall::Balances(_)
+			| RuntimeCall::Sudo(_)
+			| RuntimeCall::Utility(_)
+			| RuntimeCall::Vesting(_)
+			| RuntimeCall::Multisig(_)
+			| RuntimeCall::Identity(_)
+			| RuntimeCall::Contracts(_)
+			| RuntimeCall::ZenlinkProtocol(_)
+			| RuntimeCall::DiaOracleModule(_)
+			| RuntimeCall::Fee(_)
+			| RuntimeCall::Issue(_)
+			| RuntimeCall::Nomination(_)
+			| RuntimeCall::Oracle(_)
+			| RuntimeCall::Redeem(_)
+			| RuntimeCall::Replace(_)
+			| RuntimeCall::Security(_)
+			| RuntimeCall::StellarRelay(_)
+			| RuntimeCall::VaultRegistry(_)
+			| RuntimeCall::VaultRewards(_)
+			| RuntimeCall::Farming(_)
+			| RuntimeCall::TokenAllowance(_)
+			| RuntimeCall::AssetRegistry(_) => true,
+			// All pallets are allowed, but exhaustive match is defensive
+			// in the case of adding new pallets.
+		}
+	}
 }
 
 // Configure FRAME pallets to include in runtime.
 
 impl frame_system::Config for Runtime {
 	/// The basic call filter to use in dispatchable.
-	type BaseCallFilter = frame_support::traits::Everything;
+	type BaseCallFilter = BaseFilter;
 	/// Block & extrinsics weights: base values and limits.
 	type BlockWeights = RuntimeBlockWeights;
 	/// The maximum length of a block (in bytes).
@@ -255,11 +432,12 @@ impl pallet_timestamp::Config for Runtime {
 
 parameter_types! {
 	pub const MaxLocks: u32 = 50;
+	pub const MaxReserves: u32 = 50;
 }
 
 impl pallet_balances::Config for Runtime {
 	type MaxLocks = MaxLocks;
-	type MaxReserves = ();
+	type MaxReserves = MaxReserves;
 	type ReserveIdentifier = [u8; 8];
 	/// The type for recording an account's balance.
 	type Balance = Balance;
@@ -269,19 +447,35 @@ impl pallet_balances::Config for Runtime {
 	type ExistentialDeposit = ConstU128<EXISTENTIAL_DEPOSIT>;
 	type AccountStore = System;
 	type WeightInfo = pallet_balances::weights::SubstrateWeight<Runtime>;
-	type FreezeIdentifier = ();
-	type MaxFreezes = ();
-	type HoldIdentifier = ();
-	type MaxHolds = ();
+}
+
+parameter_types! {
+	pub const TransactionByteFee: Balance = 100 * NANOUNIT;
+	pub const OperationalFeeMultiplier: u8 = 5;
+}
+
+type NegativeImbalance = <Balances as FrameCurrency<AccountId>>::NegativeImbalance;
+
+pub struct DealWithFees;
+impl OnUnbalanced<NegativeImbalance> for DealWithFees {
+	fn on_unbalanceds<B>(mut fees_then_tips: impl Iterator<Item = NegativeImbalance>) {
+		if let Some(mut fees) = fees_then_tips.next() {
+			if let Some(tips) = fees_then_tips.next() {
+				tips.merge_into(&mut fees);
+			}
+			// for fees and tips, 100% to treasury
+			Treasury::on_unbalanced(fees);
+		}
+	}
 }
 
 impl pallet_transaction_payment::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
-	type OnChargeTransaction = CurrencyAdapter<Balances, ()>;
-	type OperationalFeeMultiplier = ConstU8<5>;
-	type WeightToFee = IdentityFee<Balance>;
-	type LengthToFee = IdentityFee<Balance>;
-	type FeeMultiplierUpdate = ();
+	type OnChargeTransaction = CurrencyAdapter<Balances, DealWithFees>;
+	type OperationalFeeMultiplier = OperationalFeeMultiplier;
+	type WeightToFee = WeightToFee;
+	type LengthToFee = ConstantMultiplier<Balance, TransactionByteFee>;
+	type FeeMultiplierUpdate = SlowAdjustingFeeUpdate<Self>;
 }
 
 impl pallet_sudo::Config for Runtime {
@@ -289,44 +483,296 @@ impl pallet_sudo::Config for Runtime {
 	type RuntimeCall = RuntimeCall;
 }
 
-pub const MILLICENTS: Balance = 1_000_000_000;
-pub const CENTS: Balance = 1_000 * MILLICENTS; // assume this is worth about a cent.
-pub const DOLLARS: Balance = 100 * CENTS;
-
 parameter_types! {
-	pub const AssetDeposit: Balance = 100 * DOLLARS;
-	pub const ApprovalDeposit: Balance = 1 * DOLLARS;
-	pub const StringLimit: u32 = 50;
-	pub const MetadataDepositBase: Balance = 10 * DOLLARS;
-	pub const MetadataDepositPerByte: Balance = 1 * DOLLARS;
+	pub const LaunchPeriod: BlockNumber = 4 * DAYS;
+	pub const VotingPeriod: BlockNumber = 4 * DAYS;
+	pub const FastTrackVotingPeriod: BlockNumber = 3 * HOURS;
+	pub const MinimumDeposit: Balance = UNIT;
+	pub const EnactmentPeriod: BlockNumber = 4 * DAYS;
+	pub const CooloffPeriod: BlockNumber = 4 * DAYS;
+	pub const MaxProposals: u32 = 100;
 }
 
-impl pallet_assets::Config for Runtime {
+impl pallet_democracy::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
-	type Balance = u128;
-	type AssetId = u32;
-	type AssetIdParameter = codec::Compact<u32>;
-	type CreateOrigin = AsEnsureOriginWithArg<EnsureSigned<AccountId>>;
 	type Currency = Balances;
-	type ForceOrigin = frame_system::EnsureRoot<AccountId>;
-	type AssetDeposit = AssetDeposit;
-	type AssetAccountDeposit = ConstU128<DOLLARS>;
-	type MetadataDepositBase = MetadataDepositBase;
-	type MetadataDepositPerByte = MetadataDepositPerByte;
-	type ApprovalDeposit = ApprovalDeposit;
-	type StringLimit = StringLimit;
-	type Freezer = ();
-	type Extra = ();
-	type WeightInfo = pallet_assets::weights::SubstrateWeight<Runtime>;
-	type RemoveItemsLimit = ConstU32<1000>;
-	type CallbackHandle = ();
+	type EnactmentPeriod = EnactmentPeriod;
+	type LaunchPeriod = LaunchPeriod;
+	type VotingPeriod = VotingPeriod;
+	type VoteLockingPeriod = EnactmentPeriod; // Same as EnactmentPeriod
+	type MinimumDeposit = MinimumDeposit;
+	/// A straight majority of the council can decide what their next motion is.
+	type ExternalOrigin =
+		pallet_collective::EnsureProportionAtLeast<AccountId, CouncilCollective, 1, 2>;
+	/// A super-majority can have the next scheduled referendum be a straight majority-carries vote.
+	type ExternalMajorityOrigin =
+		pallet_collective::EnsureProportionAtLeast<AccountId, CouncilCollective, 1, 2>;
+	/// A unanimous council can have the next scheduled referendum be a straight default-carries
+	/// (NTB) vote.
+	type ExternalDefaultOrigin =
+		pallet_collective::EnsureProportionAtLeast<AccountId, CouncilCollective, 1, 1>;
+	/// Two thirds of the technical committee can have an ExternalMajority/ExternalDefault vote
+	/// be tabled immediately and with a shorter voting/enactment period.
+	type FastTrackOrigin =
+		pallet_collective::EnsureProportionAtLeast<AccountId, TechnicalCollective, 2, 3>;
+	type InstantOrigin =
+		pallet_collective::EnsureProportionAtLeast<AccountId, TechnicalCollective, 1, 1>;
+	type InstantAllowed = frame_support::traits::ConstBool<true>;
+	type FastTrackVotingPeriod = FastTrackVotingPeriod;
+	// To cancel a proposal which has been passed, 2/3 of the council must agree to it.
+	type CancellationOrigin =
+		pallet_collective::EnsureProportionAtLeast<AccountId, CouncilCollective, 2, 3>;
+	// To cancel a proposal before it has been passed, the technical committee must be unanimous or
+	// Root must agree.
+	type CancelProposalOrigin = EitherOfDiverse<
+		EnsureRoot<AccountId>,
+		pallet_collective::EnsureProportionAtLeast<AccountId, TechnicalCollective, 1, 1>,
+	>;
+	type BlacklistOrigin = EnsureRoot<AccountId>;
+	// Any single technical committee member may veto a coming council proposal, however they can
+	// only do it once and it lasts only for the cool-off period.
+	type VetoOrigin = pallet_collective::EnsureMember<AccountId, TechnicalCollective>;
+	type CooloffPeriod = CooloffPeriod;
+	type Slash = ();
+	type Scheduler = Scheduler;
+	type PalletsOrigin = OriginCaller;
+	type MaxVotes = ConstU32<100>;
+	type WeightInfo = pallet_democracy::weights::SubstrateWeight<Runtime>;
+	type MaxProposals = MaxProposals;
+	type Preimages = Preimage;
+	type MaxDeposits = ConstU32<100>;
+	type MaxBlacklisted = ConstU32<100>;
+	type SubmitOrigin = EnsureSigned<AccountId>;
 }
 
 parameter_types! {
-	pub const DepositPerItem: Balance = deposit(1, 0);
-	pub const DepositPerByte: Balance = deposit(0, 1);
-	pub Schedule: pallet_contracts::Schedule<Runtime> = schedule::<Runtime>();
-	pub const DefaultDepositLimit: Balance = deposit(1024, 1024 * 1024);
+	pub const CouncilMotionDuration: BlockNumber = 3 * DAYS;
+	pub const CouncilMaxProposals: u32 = 100;
+	pub const CouncilMaxMembers: u32 = 100;
+}
+
+type CouncilCollective = pallet_collective::Instance1;
+impl pallet_collective::Config<CouncilCollective> for Runtime {
+	type RuntimeOrigin = RuntimeOrigin;
+	type Proposal = RuntimeCall;
+	type RuntimeEvent = RuntimeEvent;
+	type MotionDuration = CouncilMotionDuration;
+	type MaxProposals = CouncilMaxProposals;
+	type MaxMembers = CouncilMaxMembers;
+	type DefaultVote = pallet_collective::PrimeDefaultVote;
+	type WeightInfo = pallet_collective::weights::SubstrateWeight<Runtime>;
+	type SetMembersOrigin = EnsureRoot<AccountId>;
+}
+
+parameter_types! {
+	pub const TechnicalMotionDuration: BlockNumber = 3 * DAYS;
+	pub const TechnicalMaxProposals: u32 = 100;
+	pub const TechnicalMaxMembers: u32 = 100;
+}
+
+type TechnicalCollective = pallet_collective::Instance2;
+impl pallet_collective::Config<TechnicalCollective> for Runtime {
+	type RuntimeOrigin = RuntimeOrigin;
+	type Proposal = RuntimeCall;
+	type RuntimeEvent = RuntimeEvent;
+	type MotionDuration = TechnicalMotionDuration;
+	type MaxProposals = TechnicalMaxProposals;
+	type MaxMembers = TechnicalMaxMembers;
+	type DefaultVote = pallet_collective::PrimeDefaultVote;
+	type WeightInfo = pallet_collective::weights::SubstrateWeight<Runtime>;
+	type SetMembersOrigin = EnsureRoot<AccountId>;
+}
+
+parameter_types! {
+	pub MaximumSchedulerWeight: Weight = Perbill::from_percent(80) *
+		RuntimeBlockWeights::get().max_block;
+}
+
+impl pallet_scheduler::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type RuntimeOrigin = RuntimeOrigin;
+	type PalletsOrigin = OriginCaller;
+	type RuntimeCall = RuntimeCall;
+	type MaximumWeight = MaximumSchedulerWeight;
+	type ScheduleOrigin = EnsureRoot<AccountId>;
+	type MaxScheduledPerBlock = ConstU32<50>;
+	type WeightInfo = pallet_scheduler::weights::SubstrateWeight<Runtime>;
+	type OriginPrivilegeCmp = EqualPrivilegeOnly;
+	type Preimages = Preimage;
+}
+
+parameter_types! {
+	pub const PreimageMaxSize: u32 = 4096 * 1024;
+	pub const PreimageBaseDeposit: Balance = UNIT;
+	// One cent: $10,000 / MB
+	pub const PreimageByteDeposit: Balance = 10 * MILLIUNIT;
+}
+
+impl pallet_preimage::Config for Runtime {
+	type WeightInfo = pallet_preimage::weights::SubstrateWeight<Runtime>;
+	type RuntimeEvent = RuntimeEvent;
+	type Currency = Balances;
+	type ManagerOrigin = EnsureRoot<AccountId>;
+	type BaseDeposit = PreimageBaseDeposit;
+	type ByteDeposit = PreimageByteDeposit;
+}
+
+parameter_types! {
+	pub const ProposalBond: Permill = Permill::from_percent(5);
+	pub const ProposalBondMinimum: Balance = 10 * UNIT;
+	pub const SpendPeriod: BlockNumber = 7 * DAYS;
+	pub const Burn: Permill = Permill::from_percent(0);
+	pub const TreasuryPalletId: PalletId = PalletId(*b"py/trsry");
+	pub const MaxApprovals: u32 = 100;
+}
+
+type TreasuryApproveOrigin = EitherOfDiverse<
+	EnsureRoot<AccountId>,
+	pallet_collective::EnsureProportionAtLeast<AccountId, CouncilCollective, 3, 5>,
+>;
+
+type TreasuryRejectOrigin = EitherOfDiverse<
+	EnsureRoot<AccountId>,
+	pallet_collective::EnsureProportionMoreThan<AccountId, CouncilCollective, 1, 2>,
+>;
+
+impl pallet_treasury::Config for Runtime {
+	type PalletId = TreasuryPalletId;
+	type Currency = Balances;
+	type ApproveOrigin = TreasuryApproveOrigin;
+	type RejectOrigin = TreasuryRejectOrigin;
+	type RuntimeEvent = RuntimeEvent;
+	type OnSlash = Treasury;
+	type ProposalBond = ProposalBond;
+	type ProposalBondMinimum = ProposalBondMinimum;
+	type ProposalBondMaximum = ();
+	type SpendPeriod = SpendPeriod;
+	type Burn = Burn;
+	type BurnDestination = ();
+	type SpendFunds = Bounties;
+	type WeightInfo = pallet_treasury::weights::SubstrateWeight<Runtime>;
+	type MaxApprovals = MaxApprovals;
+	type SpendOrigin = frame_support::traits::NeverEnsureOrigin<u128>;
+}
+
+parameter_types! {
+	pub const BountyCuratorDeposit: Permill = Permill::from_percent(50);
+	pub const BountyValueMinimum: Balance = 5 * UNIT;
+	pub const BountyDepositBase: Balance = UNIT;
+	pub const CuratorDepositMultiplier: Permill = Permill::from_percent(50);
+	pub const CuratorDepositMin: Balance = UNIT;
+	pub const CuratorDepositMax: Balance = 100 * UNIT;
+	pub const DataDepositPerByte: Balance = 30 * MILLIUNIT;
+	pub const BountyDepositPayoutDelay: BlockNumber = 4 * DAYS;
+	pub const BountyUpdatePeriod: BlockNumber = 20 * DAYS;
+	pub const MaximumReasonLength: u32 = 5000;
+}
+
+impl pallet_bounties::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type BountyDepositBase = BountyDepositBase;
+	type BountyDepositPayoutDelay = BountyDepositPayoutDelay;
+	type BountyUpdatePeriod = BountyUpdatePeriod;
+	type CuratorDepositMultiplier = CuratorDepositMultiplier;
+	type CuratorDepositMin = CuratorDepositMin;
+	type CuratorDepositMax = CuratorDepositMax;
+	type BountyValueMinimum = BountyValueMinimum;
+	type DataDepositPerByte = DataDepositPerByte;
+	type MaximumReasonLength = MaximumReasonLength;
+	type WeightInfo = pallet_bounties::weights::SubstrateWeight<Runtime>;
+	type ChildBountyManager = ChildBounties;
+}
+
+parameter_types! {
+	pub const ChildBountyValueMinimum: Balance = UNIT;
+}
+
+impl pallet_child_bounties::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type MaxActiveChildBountyCount = ConstU32<10>;
+	type ChildBountyValueMinimum = ChildBountyValueMinimum;
+	type WeightInfo = pallet_child_bounties::weights::SubstrateWeight<Runtime>;
+}
+
+parameter_type_with_key! {
+	pub ExistentialDeposits: |_currency_id: CurrencyId| -> Balance {
+		NANOUNIT
+	};
+}
+
+pub fn get_all_module_accounts() -> Vec<AccountId> {
+	vec![Treasury::account_id()]
+}
+
+pub struct DustRemovalWhitelist;
+impl Contains<AccountId> for DustRemovalWhitelist {
+	fn contains(a: &AccountId) -> bool {
+		get_all_module_accounts().contains(a)
+	}
+}
+
+pub struct CurrencyHooks<T>(PhantomData<T>);
+impl<T: orml_tokens::Config> MutationHooks<T::AccountId, T::CurrencyId, T::Balance>
+	for CurrencyHooks<T>
+{
+	type OnDust = orml_tokens::BurnDust<T>;
+	type OnSlash = ();
+	type PreDeposit = ();
+	type PostDeposit = ();
+	type PreTransfer = ();
+	type PostTransfer = ();
+	type OnNewTokenAccount = ();
+	type OnKilledTokenAccount = ();
+}
+
+impl orml_tokens::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Balance = Balance;
+	type Amount = Amount;
+	type CurrencyId = CurrencyId;
+	type WeightInfo = ();
+	type ExistentialDeposits = ExistentialDeposits;
+	type CurrencyHooks = CurrencyHooks<Runtime>;
+	type MaxLocks = ConstU32<50>;
+	type DustRemovalWhitelist = DustRemovalWhitelist;
+	type MaxReserves = ConstU32<0>;
+	type ReserveIdentifier = ReserveIdentifier;
+}
+
+parameter_types! {
+	pub const NativeCurrencyId: CurrencyId = CurrencyId::Native;
+}
+
+impl orml_currencies::Config for Runtime {
+	type MultiCurrency = Tokens;
+	type NativeCurrency = BasicCurrencyAdapter<Runtime, Balances, Amount, BlockNumber>;
+	type GetNativeCurrencyId = NativeCurrencyId;
+	type WeightInfo = ();
+}
+
+impl orml_asset_registry::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type CustomMetadata = asset_registry::CustomMetadata;
+	type AssetId = CurrencyId;
+	type AuthorityOrigin = asset_registry::AssetAuthority;
+	type AssetProcessor = asset_registry::CustomAssetProcessor;
+	type Balance = Balance;
+	type WeightInfo = weights::orml_asset_registry::WeightInfo<Runtime>;
+}
+
+parameter_types! {
+	pub const DepositBase: Balance = 300 * MILLIUNIT;
+	pub const DepositFactor: Balance = 50 * MILLIUNIT;
+}
+
+impl pallet_multisig::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type RuntimeCall = RuntimeCall;
+	type Currency = Balances;
+	type DepositBase = DepositBase;
+	type DepositFactor = DepositFactor;
+	type MaxSignatories = ConstU32<20>;
+	type WeightInfo = pallet_multisig::weights::SubstrateWeight<Runtime>;
 }
 
 impl pallet_utility::Config for Runtime {
@@ -336,11 +782,323 @@ impl pallet_utility::Config for Runtime {
 	type WeightInfo = pallet_utility::weights::SubstrateWeight<Runtime>;
 }
 
-pub enum AllowBalancesCall {}
+parameter_types! {
+	pub const MinVestedTransfer: Balance = 0;
+	pub UnvestedFundsAllowedWithdrawReasons: WithdrawReasons =
+		WithdrawReasons::except(WithdrawReasons::TRANSFER | WithdrawReasons::RESERVE);
+}
 
-impl frame_support::traits::Contains<RuntimeCall> for AllowBalancesCall {
-	fn contains(call: &RuntimeCall) -> bool {
-		matches!(call, RuntimeCall::Balances(BalancesCall::transfer_allow_death { .. }))
+impl pallet_vesting::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Currency = Balances;
+	type BlockNumberToBalance = ConvertInto;
+	type MinVestedTransfer = MinVestedTransfer;
+	type UnvestedFundsAllowedWithdrawReasons = UnvestedFundsAllowedWithdrawReasons;
+	type WeightInfo = pallet_vesting::weights::SubstrateWeight<Runtime>;
+	const MAX_VESTING_SCHEDULES: u32 = 10;
+}
+
+const fn deposit(items: u32, bytes: u32) -> Balance {
+	(items as Balance * UNIT + (bytes as Balance) * (5 * MILLIUNIT / 100)) / 10
+}
+
+parameter_types! {
+	pub const DepositPerItem: Balance = deposit(1, 0);
+	pub const DepositPerByte: Balance = deposit(0, 1);
+	pub const DeletionQueueDepth: u32 = 128;
+	pub DeletionWeightLimit: Weight = RuntimeBlockWeights::get()
+	.per_class
+	.get(DispatchClass::Normal)
+	.max_total
+	.unwrap_or(RuntimeBlockWeights::get().max_block);
+	pub Schedule: pallet_contracts::Schedule<Runtime> = pallet_contracts::Schedule::<Runtime>{
+		limits: pallet_contracts::Limits{
+			parameters: 256,
+			..Default::default()
+		},
+		..Default::default()
+	};
+}
+
+#[derive(Default)]
+pub struct Psp22Extension;
+
+use runtime_common::chain_ext::*;
+pub(crate) type BalanceOfForChainExt<T> =
+	<<T as orml_currencies::Config>::MultiCurrency as orml_traits::MultiCurrency<
+		<T as frame_system::Config>::AccountId,
+	>>::Balance;
+
+impl<T> ChainExtension<T> for Psp22Extension
+where
+	T: SysConfig
+		+ orml_tokens::Config<CurrencyId = CurrencyId>
+		+ pallet_contracts::Config
+		+ orml_currencies::Config<MultiCurrency = Tokens, AccountId = AccountId>
+		+ orml_currencies_allowance_extension::Config
+		+ dia_oracle::Config,
+	<T as SysConfig>::AccountId: UncheckedFrom<<T as SysConfig>::Hash> + AsRef<[u8]>,
+{
+	fn call<E: Ext>(&mut self, mut env: Environment<E, InitState>) -> Result<RetVal, DispatchError>
+	where
+		E: Ext<T = T>,
+		<E::T as SysConfig>::AccountId: UncheckedFrom<<E::T as SysConfig>::Hash> + AsRef<[u8]>,
+	{
+		let func_id = env.func_id();
+
+		warn!("Calling function with ID {} from Psp22Extension", func_id);
+
+		// debug_message weight is a good approximation of the additional overhead of going
+		// from contract layer to substrate layer.
+		let overhead_weight = Weight::from_parts(
+			<T as pallet_contracts::Config>::Schedule::get()
+				.host_fn_weights
+				.debug_message
+				.ref_time(),
+			0,
+		);
+
+		match func_id {
+			// totalSupply(currency)
+			1101 => {
+				let mut env = env.buf_in_buf_out();
+				let base_weight = <T as frame_system::Config>::DbWeight::get().reads(1);
+				env.charge_weight(base_weight.saturating_add(overhead_weight))?;
+				let input = env.read(256)?;
+				let currency_id: CurrencyId = chain_ext::decode(input)
+					.map_err(|_| DispatchError::Other("ChainExtension failed to decode input"))?;
+
+				warn!("Calling totalSupply() for currency {:?}", currency_id);
+
+				ensure!(
+					orml_currencies_allowance_extension::Pallet::<T>::is_allowed_currency(
+						currency_id,
+					),
+					DispatchError::Other("ChainExtension failed to decode input")
+				);
+
+				let total_supply =
+					<orml_currencies::Pallet<T> as MultiCurrency<T::AccountId>>::total_issuance(
+						currency_id,
+					);
+
+				env.write(&total_supply.encode(), false, None).map_err(|_| {
+					DispatchError::Other("ChainExtension failed to call total_issuance")
+				})?;
+			},
+			// balanceOf(currency, account)
+			1102 => {
+				let mut env = env.buf_in_buf_out();
+				let base_weight = <T as frame_system::Config>::DbWeight::get().reads(1);
+				env.charge_weight(base_weight.saturating_add(overhead_weight))?;
+				let input = env.read(256)?;
+				let (currency_id, account_id): (CurrencyId, T::AccountId) =
+					chain_ext::decode(input).map_err(|_| {
+						DispatchError::Other("ChainExtension failed to decode input")
+					})?;
+
+				warn!(
+					"Calling balanceOf() for currency {:?} and account {:?}",
+					currency_id, account_id
+				);
+
+				ensure!(
+					orml_currencies_allowance_extension::Pallet::<T>::is_allowed_currency(
+						currency_id,
+					),
+					DispatchError::Other("CurrencyId is not allowed for chain extension",)
+				);
+
+				let balance =
+					<orml_currencies::Pallet<T> as MultiCurrency<T::AccountId>>::free_balance(
+						currency_id,
+						&account_id,
+					);
+
+				env.write(&balance.encode(), false, None)
+					.map_err(|_| DispatchError::Other("ChainExtension failed to call balance"))?;
+			},
+			// transfer(currency, recipient, amount)
+			1103 => {
+				let ext = env.ext();
+				let caller = ext.caller().clone();
+
+				let mut env = env.buf_in_buf_out();
+				// Here we use weights for non native currency as worst case scenario, since we can't know whether it's native or not until we've already read from contract env.
+				let base_weight =
+					<T as orml_currencies::Config>::WeightInfo::transfer_non_native_currency();
+				env.charge_weight(base_weight.saturating_add(overhead_weight))?;
+				let input = env.read(256)?;
+				let (currency_id, recipient, amount): (
+					CurrencyId,
+					T::AccountId,
+					BalanceOfForChainExt<T>,
+				) = chain_ext::decode(input)
+					.map_err(|_| DispatchError::Other("ChainExtension failed to decode input"))?;
+
+				warn!(
+					"Calling transfer() sending {:?} {:?}, from {:?} to {:?}",
+					amount, currency_id, caller, recipient
+				);
+
+				ensure!(
+					orml_currencies_allowance_extension::Pallet::<T>::is_allowed_currency(
+						currency_id,
+					),
+					DispatchError::Other("CurrencyId is not allowed for chain extension",)
+				);
+
+				<orml_currencies::Pallet<T> as MultiCurrency<T::AccountId>>::transfer(
+					currency_id,
+					&caller,
+					&recipient,
+					amount,
+				)?;
+			},
+			// allowance(currency, owner, spender)
+			1104 => {
+				let mut env = env.buf_in_buf_out();
+				let base_weight = <T as frame_system::Config>::DbWeight::get().reads(1);
+				env.charge_weight(base_weight.saturating_add(overhead_weight))?;
+				let input = env.read(256)?;
+				let (currency_id, owner, spender): (CurrencyId, T::AccountId, T::AccountId) =
+					chain_ext::decode(input).map_err(|_| {
+						DispatchError::Other("ChainExtension failed to decode input")
+					})?;
+
+				warn!(
+					"Calling allowance() for currency {:?}, owner {:?} and spender {:?}",
+					currency_id, owner, spender
+				);
+
+				ensure!(
+					orml_currencies_allowance_extension::Pallet::<T>::is_allowed_currency(
+						currency_id,
+					),
+					DispatchError::Other("CurrencyId is not allowed for chain extension")
+				);
+
+				let allowance = orml_currencies_allowance_extension::Pallet::<T>::allowance(
+					currency_id,
+					&owner,
+					&spender,
+				);
+
+				env.write(&allowance.encode(), false, None)
+					.map_err(|_| DispatchError::Other("ChainExtension failed to call balance"))?;
+			},
+			// approve(currency, spender, amount)
+			1105 => {
+				let ext = env.ext();
+				let caller = ext.caller().clone();
+
+				let mut env = env.buf_in_buf_out();
+				let base_weight =
+					<<T as AllowanceConfig>::WeightInfo as AllowanceWeightInfo>::approve();
+				env.charge_weight(base_weight.saturating_add(overhead_weight))?;
+				let input = env.read(256)?;
+				let (currency_id, spender, amount): (
+					CurrencyId,
+					T::AccountId,
+					BalanceOfForChainExt<T>,
+				) = chain_ext::decode(input)
+					.map_err(|_| DispatchError::Other("ChainExtension failed to decode input"))?;
+
+				warn!(
+					"Calling approve() allowing spender {:?} to transfer {:?} {:?} from {:?}",
+					spender, amount, currency_id, caller
+				);
+
+				ensure!(
+					orml_currencies_allowance_extension::Pallet::<T>::is_allowed_currency(
+						currency_id,
+					),
+					DispatchError::Other("CurrencyId is not allowed for chain extension",)
+				);
+
+				orml_currencies_allowance_extension::Pallet::<T>::do_approve_transfer(
+					currency_id,
+					&caller,
+					&spender,
+					amount,
+				)?;
+			},
+			// transfer_from(sender, currency, recipient, amount)
+			1106 => {
+				let ext = env.ext();
+				let caller = ext.caller().clone();
+
+				let mut env = env.buf_in_buf_out();
+				let base_weight =
+					<<T as AllowanceConfig>::WeightInfo as AllowanceWeightInfo>::transfer_from();
+				env.charge_weight(base_weight.saturating_add(overhead_weight))?;
+				let input = env.read(256)?;
+				let (owner, currency_id, recipient, amount): (
+					T::AccountId,
+					CurrencyId,
+					T::AccountId,
+					BalanceOfForChainExt<T>,
+				) = chain_ext::decode(input)
+					.map_err(|_| DispatchError::Other("ChainExtension failed to decode input"))?;
+
+				warn!(
+					"Calling transfer_from() for caller {:?}, sending {:?} {:?}, from {:?} to {:?}",
+					caller, amount, currency_id, owner, recipient
+				);
+
+				ensure!(
+					orml_currencies_allowance_extension::Pallet::<T>::is_allowed_currency(
+						currency_id,
+					),
+					DispatchError::Other("CurrencyId is not allowed for chain extension",)
+				);
+
+				orml_currencies_allowance_extension::Pallet::<T>::do_transfer_approved(
+					currency_id,
+					&owner,
+					&caller,
+					&recipient,
+					amount,
+				)?;
+			},
+
+			// get_coin_info(blockchain, symbol)
+			1200 => {
+				let mut env = env.buf_in_buf_out();
+				let base_weight = <T as frame_system::Config>::DbWeight::get().reads(1);
+				env.charge_weight(base_weight.saturating_add(overhead_weight))?;
+				let (blockchain, symbol): (Blockchain, Symbol) = env.read_as()?;
+
+				let result = <dia_oracle::Pallet<T> as DiaOracle>::get_coin_info(
+					blockchain.to_trimmed_vec(),
+					symbol.to_trimmed_vec(),
+				);
+
+				warn!("Calling get_coin_info() for: {:?}:{:?}", blockchain, symbol);
+
+				let result = match result {
+					Ok(coin_info) => {
+						Result::<CoinInfo, ChainExtensionError>::Ok(CoinInfo::from(coin_info))
+					},
+					Err(e) => {
+						Result::<CoinInfo, ChainExtensionError>::Err(ChainExtensionError::from(e))
+					},
+				};
+				env.write(&result.encode(), false, None).map_err(|_| {
+					DispatchError::Other("ChainExtension failed to call 'price feed'")
+				})?;
+			},
+			_ => {
+				error!("Called an unregistered `func_id`: {:}", func_id);
+				return Err(DispatchError::Other("Unimplemented func_id"));
+			},
+		}
+
+		Ok(RetVal::Converging(0))
+	}
+
+	fn enabled() -> bool {
+		true
 	}
 }
 
@@ -350,35 +1108,262 @@ impl pallet_contracts::Config for Runtime {
 	type Currency = Balances;
 	type RuntimeEvent = RuntimeEvent;
 	type RuntimeCall = RuntimeCall;
-
-	/// The safest default is to allow no calls at all.
-	///
-	/// Runtimes should whitelist dispatchables that are allowed to be called from contracts
-	/// and make sure they are stable. Dispatchables exposed to contracts are not allowed to
-	/// change because that would break already deployed contracts. The `RuntimeCall` structure
-	/// itself is not allowed to change the indices of existing pallets, too.
-	type CallFilter = AllowBalancesCall;
+	type CallFilter = frame_support::traits::Nothing;
 	type DepositPerItem = DepositPerItem;
 	type DepositPerByte = DepositPerByte;
-	type CallStack = [pallet_contracts::Frame<Self>; 23];
+	type CallStack = [pallet_contracts::Frame<Self>; 5];
 	type WeightPrice = pallet_transaction_payment::Pallet<Self>;
 	type WeightInfo = pallet_contracts::weights::SubstrateWeight<Self>;
-	type ChainExtension = pallet_assets_chain_extension::substrate::AssetsExtension;
+	type ChainExtension = Psp22Extension;
+	type DeletionQueueDepth = DeletionQueueDepth;
+	type DeletionWeightLimit = DeletionWeightLimit;
 	type Schedule = Schedule;
 	type AddressGenerator = pallet_contracts::DefaultAddressGenerator;
-	// This node is geared towards development and testing of contracts.
-	// We decided to increase the default allowed contract size for this
-	// reason (the default is `128 * 1024`).
-	//
-	// Our reasoning is that the error code `CodeTooLarge` is thrown
-	// if a too-large contract is uploaded. We noticed that it poses
-	// less friction during development when the requirement here is
-	// just more lax.
-	type MaxCodeLen = ConstU32<{ 256 * 1024 }>;
-	type DefaultDepositLimit = DefaultDepositLimit;
+	type MaxCodeLen = ConstU32<{ 123 * 1024 }>;
 	type MaxStorageKeyLen = ConstU32<128>;
-	type MaxDebugBufferLen = ConstU32<{ 2 * 1024 * 1024 }>;
 	type UnsafeUnstableInterface = ConstBool<true>;
+	type MaxDebugBufferLen = ConstU32<{ 2 * 1024 * 1024 }>;
+}
+
+impl pallet_insecure_randomness_collective_flip::Config for Runtime {}
+
+impl orml_currencies_allowance_extension::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type WeightInfo =
+		orml_currencies_allowance_extension::default_weights::SubstrateWeight<Runtime>;
+	type MaxAllowedCurrencies = ConstU32<256>;
+}
+
+parameter_types! {
+	pub const BasicDeposit: Balance = 10 * UNIT;       // 258 bytes on-chain
+	pub const FieldDeposit: Balance = 25 * MILLIUNIT;  // 66 bytes on-chain
+	pub const SubAccountDeposit: Balance = 2 * UNIT;   // 53 bytes on-chain
+	pub const MaxSubAccounts: u32 = 100;
+	pub const MaxAdditionalFields: u32 = 100;
+	pub const MaxRegistrars: u32 = 20;
+}
+
+type EnsureRootOrHalfCouncil = EitherOfDiverse<
+	EnsureRoot<AccountId>,
+	pallet_collective::EnsureProportionMoreThan<AccountId, CouncilCollective, 1, 2>,
+>;
+
+impl pallet_identity::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Currency = Balances;
+	type BasicDeposit = BasicDeposit;
+	type FieldDeposit = FieldDeposit;
+	type SubAccountDeposit = SubAccountDeposit;
+	type MaxSubAccounts = MaxSubAccounts;
+	type MaxAdditionalFields = MaxAdditionalFields;
+	type MaxRegistrars = MaxRegistrars;
+	type Slashed = Treasury;
+	type ForceOrigin = EnsureRootOrHalfCouncil;
+	type RegistrarOrigin = EnsureRootOrHalfCouncil;
+	type WeightInfo = pallet_identity::weights::SubstrateWeight<Runtime>;
+}
+
+impl dia_oracle::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type RuntimeCall = RuntimeCall;
+	type AuthorityId = dia_oracle::crypto::DiaAuthId;
+	type WeightInfo = dia_oracle::weights::DiaWeightInfo<Runtime>;
+}
+
+impl frame_system::offchain::SigningTypes for Runtime {
+	type Public = <Signature as sp_runtime::traits::Verify>::Signer;
+	type Signature = Signature;
+}
+
+impl<LocalCall> frame_system::offchain::CreateSignedTransaction<LocalCall> for Runtime
+where
+	RuntimeCall: From<LocalCall>,
+{
+	fn create_transaction<C: frame_system::offchain::AppCrypto<Self::Public, Self::Signature>>(
+		call: RuntimeCall,
+		public: <Signature as sp_runtime::traits::Verify>::Signer,
+		account: AccountId,
+		index: Index,
+	) -> Option<(
+		RuntimeCall,
+		<UncheckedExtrinsic as sp_runtime::traits::Extrinsic>::SignaturePayload,
+	)> {
+		let period = BlockHashCount::get() as u64;
+		let current_block = System::block_number().saturated_into::<u64>().saturating_sub(1);
+		let tip = 0;
+		let extra: SignedExtra = (
+			frame_system::CheckNonZeroSender::<Runtime>::new(),
+			frame_system::CheckSpecVersion::<Runtime>::new(),
+			frame_system::CheckTxVersion::<Runtime>::new(),
+			frame_system::CheckGenesis::<Runtime>::new(),
+			frame_system::CheckEra::<Runtime>::from(generic::Era::mortal(period, current_block)),
+			frame_system::CheckNonce::<Runtime>::from(index),
+			frame_system::CheckWeight::<Runtime>::new(),
+			pallet_transaction_payment::ChargeTransactionPayment::<Runtime>::from(tip),
+		);
+
+		let raw_payload = SignedPayload::new(call, extra).ok()?;
+		let signature = raw_payload.using_encoded(|payload| C::sign(payload, public))?;
+		let address = account;
+		let (call, extra, _) = raw_payload.deconstruct();
+		Some((call, (sp_runtime::MultiAddress::Id(address), signature, extra)))
+	}
+}
+
+pub struct CurrencyConvert;
+impl currency::CurrencyConversion<currency::Amount<Runtime>, CurrencyId> for CurrencyConvert {
+	fn convert(
+		amount: &currency::Amount<Runtime>,
+		to: CurrencyId,
+	) -> Result<currency::Amount<Runtime>, DispatchError> {
+		Oracle::convert(amount, to)
+	}
+}
+
+parameter_types! {
+	pub const RelayChainCurrencyId: CurrencyId = XCM(0);
+}
+impl currency::Config for Runtime {
+	type UnsignedFixedPoint = UnsignedFixedPoint;
+	type SignedInner = SignedInner;
+	type SignedFixedPoint = SignedFixedPoint;
+	type Balance = Balance;
+	type GetRelayChainCurrencyId = RelayChainCurrencyId;
+	type AssetConversion = primitives::AssetConversion;
+	type BalanceConversion = primitives::BalanceConversion;
+	type CurrencyConversion = CurrencyConvert;
+	type AmountCompatibility = primitives::StellarCompatibility;
+}
+
+parameter_types! {
+	pub const FarmingKeeperPalletId: PalletId = PalletId(*b"fo/fmkpr");
+	pub const FarmingRewardIssuerPalletId: PalletId = PalletId(*b"fo/fmrir");
+	pub FoucocoTreasuryAccount: AccountId = TreasuryPalletId::get().into_account_truncating();
+}
+
+impl farming::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type CurrencyId = CurrencyId;
+	type MultiCurrency = Currencies;
+	type ControlOrigin = EnsureRoot<AccountId>;
+	type WeightInfo = farming::weights::BifrostWeight<Runtime>;
+	type TreasuryAccount = FoucocoTreasuryAccount;
+	type Keeper = FarmingKeeperPalletId;
+	type RewardIssuer = FarmingRewardIssuerPalletId;
+}
+
+impl security::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type WeightInfo = security::SubstrateWeight<Runtime>;
+}
+
+impl staking::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type SignedInner = SignedInner;
+	type SignedFixedPoint = SignedFixedPoint;
+	type GetNativeCurrencyId = NativeCurrencyId;
+	type CurrencyId = CurrencyId;
+}
+
+impl oracle::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type WeightInfo = oracle::SubstrateWeight<Runtime>;
+	type DataProvider = DataProviderImpl;
+	#[cfg(feature = "runtime-benchmarks")]
+	type DataFeedProvider = DataFeederBenchmark<
+		oracle::OracleKey,
+		oracle::TimestampedValue<UnsignedFixedPoint, Moment>,
+		Self::AccountId,
+	>;
+}
+
+parameter_types! {
+	pub const OrganizationLimit: u32 = 255;
+	pub const ValidatorLimit: u32 = 255;
+	pub const IsPublicNetwork: bool = false;
+}
+
+impl stellar_relay::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type OrganizationId = u128;
+	type OrganizationLimit = OrganizationLimit;
+	type ValidatorLimit = ValidatorLimit;
+	type IsPublicNetwork = IsPublicNetwork;
+	type WeightInfo = stellar_relay::SubstrateWeight<Runtime>;
+}
+
+impl reward::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type SignedFixedPoint = SignedFixedPoint;
+	type RewardId = VaultId;
+	type CurrencyId = CurrencyId;
+	type GetNativeCurrencyId = NativeCurrencyId;
+}
+
+parameter_types! {
+	pub const FeePalletId: PalletId = PalletId(*b"mod/fees");
+	pub const VaultRegistryPalletId: PalletId = PalletId(*b"mod/vreg");
+
+	pub const MaxExpectedValue: UnsignedFixedPoint = UnsignedFixedPoint::from_inner(<UnsignedFixedPoint as FixedPointNumber>::DIV);
+	pub FeeAccount: AccountId = FeePalletId::get().into_account_truncating();
+}
+
+impl fee::Config for Runtime {
+	type FeePalletId = FeePalletId;
+	type WeightInfo = fee::SubstrateWeight<Runtime>;
+	type SignedFixedPoint = SignedFixedPoint;
+	type SignedInner = SignedInner;
+	type UnsignedFixedPoint = UnsignedFixedPoint;
+	type UnsignedInner = UnsignedInner;
+	type VaultRewards = VaultRewards;
+	type VaultStaking = VaultStaking;
+	type OnSweep = currency::SweepFunds<Runtime, FeeAccount>;
+	type MaxExpectedValue = MaxExpectedValue;
+}
+
+impl vault_registry::Config for Runtime {
+	type PalletId = VaultRegistryPalletId;
+	type RuntimeEvent = RuntimeEvent;
+	type Balance = Balance;
+	type WeightInfo = vault_registry::SubstrateWeight<Runtime>;
+	type GetGriefingCollateralCurrencyId = NativeCurrencyId;
+}
+
+impl redeem::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type WeightInfo = redeem::SubstrateWeight<Runtime>;
+}
+
+pub struct BlockNumberToBalance;
+
+impl sp_runtime::traits::Convert<BlockNumber, Balance> for BlockNumberToBalance {
+	fn convert(a: BlockNumber) -> Balance {
+		a.into()
+	}
+}
+
+impl issue::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type BlockNumberToBalance = BlockNumberToBalance;
+	type WeightInfo = issue::SubstrateWeight<Runtime>;
+}
+
+impl nomination::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type WeightInfo = nomination::SubstrateWeight<Runtime>;
+}
+
+impl replace::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type WeightInfo = replace::SubstrateWeight<Runtime>;
+}
+
+impl<C> frame_system::offchain::SendTransactionTypes<C> for Runtime
+where
+	RuntimeCall: From<C>,
+{
+	type Extrinsic = UncheckedExtrinsic;
+	type OverarchingCall = RuntimeCall;
 }
 
 // Create the runtime by composing the FRAME pallets that were previously configured.
@@ -389,50 +1374,63 @@ construct_runtime!(
 		NodeBlock = opaque::Block,
 		UncheckedExtrinsic = UncheckedExtrinsic,
 	{
-		System: frame_system,
-		RandomnessCollectiveFlip: pallet_insecure_randomness_collective_flip,
-		Utility: pallet_utility,
-		Timestamp: pallet_timestamp,
-		Balances: pallet_balances,
-		Authorship: pallet_authorship,
-		TransactionPayment: pallet_transaction_payment,
-		Sudo: pallet_sudo,
-		Contracts: pallet_contracts,
-		Assets: pallet_assets,
+		// System support stuff.
+		System: frame_system::{Pallet, Call, Config, Storage, Event<T>} = 0,
+		Timestamp: pallet_timestamp::{Pallet, Call, Storage, Inherent} = 2,
+
+		// Monetary stuff.
+		Balances: pallet_balances::{Pallet, Call, Storage, Config<T>, Event<T>} = 10,
+		TransactionPayment: pallet_transaction_payment::{Pallet, Storage, Event<T>} = 11,
+
+		// Governance
+		Sudo: pallet_sudo::{Pallet, Call, Storage, Config<T>, Event<T>} = 12,
+		Democracy: pallet_democracy::{Pallet, Call, Storage, Config<T>, Event<T>} = 13,
+		Council: pallet_collective::<Instance1>::{Pallet, Call, Storage, Config<T>, Origin<T>, Event<T>} = 14,
+		TechnicalCommittee: pallet_collective::<Instance2>::{Pallet, Call, Storage, Config<T>, Origin<T>,  Event<T>} = 15,
+		Scheduler: pallet_scheduler::{Pallet, Call, Storage, Event<T>} = 16,
+		Preimage: pallet_preimage::{Pallet, Call, Storage, Event<T>} = 17,
+		Multisig: pallet_multisig::{Pallet, Call, Storage, Event<T>} = 18,
+		Treasury: pallet_treasury::{Pallet, Call, Storage, Event<T>} = 19,
+		Bounties: pallet_bounties::{Pallet, Call, Storage, Event<T>} = 20,
+		ChildBounties: pallet_child_bounties::{Pallet, Call, Storage, Event<T>} = 21,
+
+		// Validators
+		Authorship: pallet_authorship = 33,
+
+		// Amendments
+		Vesting: pallet_vesting::{Pallet, Call, Storage, Event<T>} = 50,
+		Utility: pallet_utility::{Pallet, Call, Event} = 51,
+		Currencies: orml_currencies::{Pallet, Call, Storage} = 52,
+		Tokens: orml_tokens::{Pallet, Call, Storage, Config<T>, Event<T>} = 53,
+		Identity: pallet_identity::{Pallet, Storage, Call, Event<T>} = 55,
+		Contracts: pallet_contracts::{Pallet, Storage, Call, Event<T>} = 56,
+		RandomnessCollectiveFlip: pallet_insecure_randomness_collective_flip::{Pallet, Storage} = 57,
+		DiaOracleModule: dia_oracle::{Pallet, Storage, Call, Config<T>, Event<T>} = 58,
+
+		ZenlinkProtocol: zenlink_protocol::{Pallet, Call, Storage, Event<T>}  = 59,
+
+		// Spacewalk pallets
+		Currency: currency::{Pallet} = 60,
+		Fee: fee::{Pallet, Call, Config<T>, Storage} = 61,
+		Issue: issue::{Pallet, Call, Config<T>, Storage, Event<T>} = 62,
+		Nomination: nomination::{Pallet, Call, Config, Storage, Event<T>} = 63,
+		Oracle: oracle::{Pallet, Call, Config, Storage, Event<T>} = 64,
+		Redeem: redeem::{Pallet, Call, Config<T>, Storage, Event<T>} = 65,
+		Replace: replace::{Pallet, Call, Config<T>, Storage, Event<T>} = 66,
+		Security: security::{Pallet, Call, Config, Storage, Event<T>} = 67,
+		StellarRelay: stellar_relay::{Pallet, Call, Config<T>, Storage, Event<T>} = 68,
+		VaultRegistry: vault_registry::{Pallet, Call, Config<T>, Storage, Event<T>, ValidateUnsigned} = 69,
+		VaultRewards: reward::{Pallet, Call, Storage, Event<T>} = 70,
+		VaultStaking: staking::{Pallet, Storage, Event<T>} = 71,
+
+		TokenAllowance: orml_currencies_allowance_extension::{Pallet, Storage, Call, Event<T>} = 80,
+
+		Farming: farming::{Pallet, Call, Storage, Event<T>} = 90,
+
+		// Asset Metadata
+		AssetRegistry: orml_asset_registry::{Pallet, Storage, Call, Event<T>, Config<T>} = 91,
 	}
 );
-
-/// The address format for describing accounts.
-pub type Address = sp_runtime::MultiAddress<AccountId, ()>;
-/// Block header type as expected by this runtime.
-pub type Header = generic::Header<BlockNumber, BlakeTwo256>;
-/// Block type as expected by this runtime.
-pub type Block = generic::Block<Header, UncheckedExtrinsic>;
-/// The SignedExtension to the basic transaction logic.
-pub type SignedExtra = (
-	frame_system::CheckNonZeroSender<Runtime>,
-	frame_system::CheckSpecVersion<Runtime>,
-	frame_system::CheckTxVersion<Runtime>,
-	frame_system::CheckGenesis<Runtime>,
-	frame_system::CheckEra<Runtime>,
-	frame_system::CheckNonce<Runtime>,
-	frame_system::CheckWeight<Runtime>,
-	pallet_transaction_payment::ChargeTransactionPayment<Runtime>,
-);
-/// The payload being signed in transactions.
-pub type SignedPayload = generic::SignedPayload<RuntimeCall, SignedExtra>;
-/// Unchecked extrinsic type as expected by this runtime.
-pub type UncheckedExtrinsic =
-	generic::UncheckedExtrinsic<Address, RuntimeCall, Signature, SignedExtra>;
-/// Executive: handles dispatch to the various modules.
-pub type Executive = frame_executive::Executive<
-	Runtime,
-	Block,
-	frame_system::ChainContext<Runtime>,
-	Runtime,
-	AllPalletsWithSystem,
-	pallet_contracts::Migration<Runtime>,
->;
 
 impl_runtime_apis! {
 	impl sp_api::Core<Block> for Runtime {
@@ -452,13 +1450,6 @@ impl_runtime_apis! {
 	impl sp_api::Metadata<Block> for Runtime {
 		fn metadata() -> OpaqueMetadata {
 			OpaqueMetadata::new(Runtime::metadata().into())
-		}
-		fn metadata_at_version(version: u32) -> Option<OpaqueMetadata> {
-			Runtime::metadata_at_version(version)
-		}
-
-		fn metadata_versions() -> sp_std::vec::Vec<u32> {
-			Runtime::metadata_versions()
 		}
 	}
 
@@ -501,13 +1492,13 @@ impl_runtime_apis! {
 
 	impl sp_session::SessionKeys<Block> for Runtime {
 		fn generate_session_keys(seed: Option<Vec<u8>>) -> Vec<u8> {
-			opaque::SessionKeys::generate(seed)
+			SessionKeys::generate(seed)
 		}
 
 		fn decode_session_keys(
 			encoded: Vec<u8>,
 		) -> Option<Vec<(Vec<u8>, KeyTypeId)>> {
-			opaque::SessionKeys::decode_into_raw_public_keys(&encoded)
+			SessionKeys::decode_into_raw_public_keys(&encoded)
 		}
 	}
 
@@ -559,6 +1550,198 @@ impl_runtime_apis! {
 		}
 	}
 
+	impl dia_oracle_runtime_api::DiaOracleApi<Block> for Runtime{
+		fn get_value(blockchain: frame_support::sp_std::vec::Vec<u8>, symbol: frame_support::sp_std::vec::Vec<u8>)-> Result<dia_oracle_runtime_api::PriceInfo, sp_runtime::DispatchError>{
+			DiaOracleModule::get_value(blockchain, symbol)
+		}
+
+		fn get_coin_info(blockchain: frame_support::sp_std::vec::Vec<u8>, symbol: frame_support::sp_std::vec::Vec<u8>)-> Result<dia_oracle_runtime_api::CoinInfo,sp_runtime::DispatchError>{
+			DiaOracleModule::get_coin_info(blockchain, symbol)
+		}
+	}
+
+
+	// zenlink runtime outer apis
+	impl zenlink_protocol_runtime_api::ZenlinkProtocolApi<Block, AccountId, ZenlinkAssetId> for Runtime {
+
+		fn get_balance(
+			asset_id: ZenlinkAssetId,
+			owner: AccountId
+		) -> AssetBalance {
+			<Runtime as zenlink_protocol::Config>::MultiAssetsHandler::balance_of(asset_id, &owner)
+		}
+
+
+		fn get_pair_by_asset_id(
+			asset_0: ZenlinkAssetId,
+			asset_1: ZenlinkAssetId
+		) -> Option<PairInfo<AccountId, AssetBalance, ZenlinkAssetId>> {
+			ZenlinkProtocol::get_pair_by_asset_id(asset_0, asset_1)
+		}
+
+		fn get_amount_in_price(
+			supply: AssetBalance,
+			path: Vec<ZenlinkAssetId>
+		) -> AssetBalance {
+			ZenlinkProtocol::desired_in_amount(supply, path)
+		}
+
+		fn get_amount_out_price(
+			supply: AssetBalance,
+			path: Vec<ZenlinkAssetId>
+		) -> AssetBalance {
+			ZenlinkProtocol::supply_out_amount(supply, path)
+		}
+
+		fn get_estimate_lptoken(
+			token_0: ZenlinkAssetId,
+			token_1: ZenlinkAssetId,
+			amount_0_desired: AssetBalance,
+			amount_1_desired: AssetBalance,
+			amount_0_min: AssetBalance,
+			amount_1_min: AssetBalance,
+		) -> AssetBalance{
+			ZenlinkProtocol::get_estimate_lptoken(
+				token_0,
+				token_1,
+				amount_0_desired,
+				amount_1_desired,
+				amount_0_min,
+				amount_1_min
+			)
+		}
+
+		fn calculate_remove_liquidity(
+			asset_0: ZenlinkAssetId,
+			asset_1: ZenlinkAssetId,
+			amount: AssetBalance,
+		) -> Option<(AssetBalance, AssetBalance)>{
+			ZenlinkProtocol::calculate_remove_liquidity(
+				asset_0,
+				asset_1,
+				amount,
+			)
+		}
+	}
+
+	impl farming_rpc_runtime_api::FarmingRuntimeApi<Block, AccountId, PoolId, CurrencyId> for Runtime {
+		fn get_farming_rewards(who: AccountId, pid: PoolId) -> Vec<(CurrencyId, Balance)> {
+			Farming::get_farming_rewards(&who, pid).unwrap_or(Vec::new())
+		}
+
+		fn get_gauge_rewards(who: AccountId, pid: PoolId) -> Vec<(CurrencyId, Balance)> {
+			Farming::get_gauge_rewards(&who, pid).unwrap_or(Vec::new())
+		}
+	}
+
+	impl module_issue_rpc_runtime_api::IssueApi<
+		Block,
+		AccountId,
+		H256,
+		IssueRequest<AccountId, BlockNumber, Balance, CurrencyId>
+	> for Runtime {
+		fn get_issue_requests(account_id: AccountId) -> Vec<H256> {
+			Issue::get_issue_requests_for_account(account_id)
+		}
+
+		fn get_vault_issue_requests(vault_id: AccountId) -> Vec<H256> {
+			Issue::get_issue_requests_for_vault(vault_id)
+		}
+	}
+
+	impl module_vault_registry_rpc_runtime_api::VaultRegistryApi<
+		Block,
+		VaultId,
+		Balance,
+		UnsignedFixedPoint,
+		CurrencyId,
+		AccountId,
+	> for Runtime {
+		fn get_vault_collateral(vault_id: VaultId) -> Result<BalanceWrapper<Balance>, DispatchError> {
+			let result = VaultRegistry::compute_collateral(&vault_id)?;
+			Ok(BalanceWrapper{amount:result.amount()})
+		}
+
+		fn get_vaults_by_account_id(account_id: AccountId) -> Result<Vec<VaultId>, DispatchError> {
+			VaultRegistry::get_vaults_by_account_id(account_id)
+		}
+
+		fn get_vault_total_collateral(vault_id: VaultId) -> Result<BalanceWrapper<Balance>, DispatchError> {
+			let result = VaultRegistry::get_backing_collateral(&vault_id)?;
+			Ok(BalanceWrapper{amount:result.amount()})
+		}
+
+		fn get_premium_redeem_vaults() -> Result<Vec<(VaultId, BalanceWrapper<Balance>)>, DispatchError> {
+			let result = VaultRegistry::get_premium_redeem_vaults()?;
+			Ok(result.iter().map(|v| (v.0.clone(), BalanceWrapper{amount:v.1.amount()})).collect())
+		}
+
+		fn get_vaults_with_issuable_tokens() -> Result<Vec<(VaultId, BalanceWrapper<Balance>)>, DispatchError> {
+			let result = VaultRegistry::get_vaults_with_issuable_tokens()?;
+			Ok(result.into_iter().map(|v| (v.0, BalanceWrapper{amount:v.1.amount()})).collect())
+		}
+
+		fn get_vaults_with_redeemable_tokens() -> Result<Vec<(VaultId, BalanceWrapper<Balance>)>, DispatchError> {
+			let result = VaultRegistry::get_vaults_with_redeemable_tokens()?;
+			Ok(result.into_iter().map(|v| (v.0, BalanceWrapper{amount:v.1.amount()})).collect())
+		}
+
+		fn get_issuable_tokens_from_vault(vault: VaultId) -> Result<BalanceWrapper<Balance>, DispatchError> {
+			let result = VaultRegistry::get_issuable_tokens_from_vault(&vault)?;
+			Ok(BalanceWrapper{amount:result.amount()})
+		}
+
+		fn get_collateralization_from_vault(vault: VaultId, only_issued: bool) -> Result<UnsignedFixedPoint, DispatchError> {
+			VaultRegistry::get_collateralization_from_vault(vault, only_issued)
+		}
+
+		fn get_collateralization_from_vault_and_collateral(vault: VaultId, collateral: BalanceWrapper<Balance>, only_issued: bool) -> Result<UnsignedFixedPoint, DispatchError> {
+			let amount = currency::Amount::new(collateral.amount, vault.collateral_currency());
+			VaultRegistry::get_collateralization_from_vault_and_collateral(vault, &amount, only_issued)
+		}
+
+		fn get_required_collateral_for_wrapped(amount_wrapped: BalanceWrapper<Balance>, wrapped_currency_id: CurrencyId, collateral_currency_id: CurrencyId) -> Result<BalanceWrapper<Balance>, DispatchError> {
+			let amount_wrapped = currency::Amount::new(amount_wrapped.amount, wrapped_currency_id);
+			let result = VaultRegistry::get_required_collateral_for_wrapped(&amount_wrapped, collateral_currency_id)?;
+			Ok(BalanceWrapper{amount:result.amount()})
+		}
+
+		fn get_required_collateral_for_vault(vault_id: VaultId) -> Result<BalanceWrapper<Balance>, DispatchError> {
+			let result = VaultRegistry::get_required_collateral_for_vault(vault_id)?;
+			Ok(BalanceWrapper{amount:result.amount()})
+		}
+	}
+
+	impl module_redeem_rpc_runtime_api::RedeemApi<
+		Block,
+		AccountId,
+		H256,
+		RedeemRequest<AccountId, BlockNumber, Balance, CurrencyId>
+	> for Runtime {
+		fn get_redeem_requests(account_id: AccountId) -> Vec<H256> {
+			Redeem::get_redeem_requests_for_account(account_id)
+		}
+
+		fn get_vault_redeem_requests(vault_account_id: AccountId) -> Vec<H256> {
+			Redeem::get_redeem_requests_for_vault(vault_account_id)
+		}
+	}
+
+	impl module_replace_rpc_runtime_api::ReplaceApi<
+		Block,
+		AccountId,
+		H256,
+		ReplaceRequest<AccountId, BlockNumber, Balance, CurrencyId>
+	> for Runtime {
+		fn get_old_vault_replace_requests(vault_id: AccountId) -> Vec<H256> {
+			Replace::get_replace_requests_for_old_vault(vault_id)
+		}
+
+		fn get_new_vault_replace_requests(vault_id: AccountId) -> Vec<H256> {
+			Replace::get_replace_requests_for_new_vault(vault_id)
+		}
+	}
+
 	impl pallet_contracts::ContractsApi<Block, AccountId, Balance, BlockNumber, Hash>
 		for Runtime
 	{
@@ -579,7 +1762,7 @@ impl_runtime_apis! {
 				storage_deposit_limit,
 				input_data,
 				CONTRACTS_DEBUG_OUTPUT,
-				pallet_contracts::Determinism::Enforced,
+				pallet_contracts::Determinism::Deterministic,
 			)
 		}
 
@@ -621,6 +1804,18 @@ impl_runtime_apis! {
 			key: Vec<u8>,
 		) -> pallet_contracts_primitives::GetStorageResult {
 			Contracts::get_storage(address, key)
+		}
+	}
+
+	impl module_oracle_rpc_runtime_api::OracleApi<Block, Balance, CurrencyId> for Runtime {
+		fn currency_to_usd(amount:BalanceWrapper<Balance>, currency_id: CurrencyId) -> Result<BalanceWrapper<Balance>, DispatchError> {
+			let result = Oracle::currency_to_usd(amount.amount, currency_id)?;
+			Ok(BalanceWrapper{amount:result})
+		}
+
+		fn usd_to_currency(amount:BalanceWrapper<Balance>, currency_id: CurrencyId) -> Result<BalanceWrapper<Balance>, DispatchError> {
+			let result = Oracle::usd_to_currency(amount.amount, currency_id)?;
+			Ok(BalanceWrapper{amount:result})
 		}
 	}
 }

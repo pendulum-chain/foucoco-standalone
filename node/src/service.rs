@@ -1,10 +1,13 @@
 //! Service and ServiceFactory implementation. Specialized wrapper over substrate service.
 
-use contracts_node_runtime::{self, opaque::Block, RuntimeApi};
+use foucoco_standalone_runtime::{self, RuntimeApi};
 pub use sc_executor::NativeElseWasmExecutor;
+use sc_keystore::LocalKeystore;
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryWorker};
 use std::sync::Arc;
+
+use runtime_common::opaque::Block;
 
 // Our native executor instance.
 pub struct ExecutorDispatch;
@@ -14,11 +17,11 @@ impl sc_executor::NativeExecutionDispatch for ExecutorDispatch {
 	type ExtendHostFunctions = ();
 
 	fn dispatch(method: &str, data: &[u8]) -> Option<Vec<u8>> {
-		contracts_node_runtime::api::dispatch(method, data)
+		foucoco_standalone_runtime::api::dispatch(method, data)
 	}
 
 	fn native_version() -> sc_executor::NativeVersion {
-		contracts_node_runtime::native_version()
+		foucoco_standalone_runtime::native_version()
 	}
 }
 
@@ -41,6 +44,10 @@ pub fn new_partial(
 	>,
 	ServiceError,
 > {
+	if config.keystore_remote.is_some() {
+		return Err(ServiceError::Other("Remote Keystores are not supported.".into()));
+	}
+
 	let telemetry = config
 		.telemetry_endpoints
 		.clone()
@@ -52,7 +59,12 @@ pub fn new_partial(
 		})
 		.transpose()?;
 
-	let executor = sc_service::new_native_or_wasm_executor(&config);
+	let executor = NativeElseWasmExecutor::<ExecutorDispatch>::new(
+		config.wasm_method,
+		config.default_heap_pages,
+		config.max_runtime_instances,
+		config.runtime_cache_size,
+	);
 
 	let (client, backend, keystore_container, task_manager) =
 		sc_service::new_full_parts::<Block, RuntimeApi, _>(
@@ -95,6 +107,13 @@ pub fn new_partial(
 	})
 }
 
+fn remote_keystore(_url: &String) -> Result<Arc<LocalKeystore>, &'static str> {
+	// FIXME: here would the concrete keystore be built,
+	//        must return a concrete type (NOT `LocalKeystore`) that
+	//        implements `CryptoStore` and `SyncCryptoStore`
+	Err("Remote Keystore not supported.")
+}
+
 /// Builds a new service for a full client.
 pub fn new_full(config: Configuration) -> Result<TaskManager, ServiceError> {
 	let sc_service::PartialComponents {
@@ -102,11 +121,23 @@ pub fn new_full(config: Configuration) -> Result<TaskManager, ServiceError> {
 		backend,
 		mut task_manager,
 		import_queue,
-		keystore_container,
+		mut keystore_container,
 		select_chain,
 		transaction_pool,
 		other: (mut telemetry,),
 	} = new_partial(&config)?;
+
+	if let Some(url) = &config.keystore_remote {
+		match remote_keystore(url) {
+			Ok(k) => keystore_container.set_remote_keystore(k),
+			Err(e) => {
+				return Err(ServiceError::Other(format!(
+					"Error hooking up remote keystore for {}: {}",
+					url, e
+				)))
+			},
+		};
+	}
 
 	let (network, system_rpc_tx, tx_handler_controller, network_starter, sync_service) =
 		sc_service::build_network(sc_service::BuildNetworkParams {
@@ -143,7 +174,7 @@ pub fn new_full(config: Configuration) -> Result<TaskManager, ServiceError> {
 	let _rpc_handlers = sc_service::spawn_tasks(sc_service::SpawnTasksParams {
 		network,
 		client: client.clone(),
-		keystore: keystore_container.keystore(),
+		keystore: keystore_container.sync_keystore(),
 		task_manager: &mut task_manager,
 		transaction_pool: transaction_pool.clone(),
 		rpc_builder: rpc_extensions_builder,

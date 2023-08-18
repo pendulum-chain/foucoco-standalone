@@ -7,8 +7,8 @@
 
 use std::sync::Arc;
 
-use contracts_node_runtime::{opaque::Block, AccountId, Balance, Index};
 use jsonrpsee::RpcModule;
+use runtime_common::{opaque::Block, AccountId, Balance, Index};
 use sc_client_api::BlockBackend;
 use sc_rpc::dev::{Dev, DevApiServer};
 use sc_transaction_pool_api::TransactionPool;
