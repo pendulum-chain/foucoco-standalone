@@ -315,40 +315,40 @@ impl Contains<RuntimeCall> for BaseFilter {
 	fn contains(call: &RuntimeCall) -> bool {
 		match call {
 			// These modules are all allowed to be called by transactions:
-			RuntimeCall::Bounties(_)
-			| RuntimeCall::ChildBounties(_)
-			| RuntimeCall::Treasury(_)
-			| RuntimeCall::Tokens(_)
-			| RuntimeCall::Currencies(_)
-			| RuntimeCall::Democracy(_)
-			| RuntimeCall::Council(_)
-			| RuntimeCall::TechnicalCommittee(_)
-			| RuntimeCall::System(_)
-			| RuntimeCall::Scheduler(_)
-			| RuntimeCall::Preimage(_)
-			| RuntimeCall::Timestamp(_)
-			| RuntimeCall::Balances(_)
-			| RuntimeCall::Sudo(_)
-			| RuntimeCall::Utility(_)
-			| RuntimeCall::Vesting(_)
-			| RuntimeCall::Multisig(_)
-			| RuntimeCall::Identity(_)
-			| RuntimeCall::Contracts(_)
-			| RuntimeCall::ZenlinkProtocol(_)
-			| RuntimeCall::DiaOracleModule(_)
-			| RuntimeCall::Fee(_)
-			| RuntimeCall::Issue(_)
-			| RuntimeCall::Nomination(_)
-			| RuntimeCall::Oracle(_)
-			| RuntimeCall::Redeem(_)
-			| RuntimeCall::Replace(_)
-			| RuntimeCall::Security(_)
-			| RuntimeCall::StellarRelay(_)
-			| RuntimeCall::VaultRegistry(_)
-			| RuntimeCall::VaultRewards(_)
-			| RuntimeCall::Farming(_)
-			| RuntimeCall::TokenAllowance(_)
-			| RuntimeCall::AssetRegistry(_) => true,
+			RuntimeCall::Bounties(_) |
+			RuntimeCall::ChildBounties(_) |
+			RuntimeCall::Treasury(_) |
+			RuntimeCall::Tokens(_) |
+			RuntimeCall::Currencies(_) |
+			RuntimeCall::Democracy(_) |
+			RuntimeCall::Council(_) |
+			RuntimeCall::TechnicalCommittee(_) |
+			RuntimeCall::System(_) |
+			RuntimeCall::Scheduler(_) |
+			RuntimeCall::Preimage(_) |
+			RuntimeCall::Timestamp(_) |
+			RuntimeCall::Balances(_) |
+			RuntimeCall::Sudo(_) |
+			RuntimeCall::Utility(_) |
+			RuntimeCall::Vesting(_) |
+			RuntimeCall::Multisig(_) |
+			RuntimeCall::Identity(_) |
+			RuntimeCall::Contracts(_) |
+			RuntimeCall::ZenlinkProtocol(_) |
+			RuntimeCall::DiaOracleModule(_) |
+			RuntimeCall::Fee(_) |
+			RuntimeCall::Issue(_) |
+			RuntimeCall::Nomination(_) |
+			RuntimeCall::Oracle(_) |
+			RuntimeCall::Redeem(_) |
+			RuntimeCall::Replace(_) |
+			RuntimeCall::Security(_) |
+			RuntimeCall::StellarRelay(_) |
+			RuntimeCall::VaultRegistry(_) |
+			RuntimeCall::VaultRewards(_) |
+			RuntimeCall::Farming(_) |
+			RuntimeCall::TokenAllowance(_) |
+			RuntimeCall::AssetRegistry(_) => true,
 			// All pallets are allowed, but exhaustive match is defensive
 			// in the case of adding new pallets.
 		}
@@ -924,7 +924,8 @@ where
 				let caller = ext.caller().clone();
 
 				let mut env = env.buf_in_buf_out();
-				// Here we use weights for non native currency as worst case scenario, since we can't know whether it's native or not until we've already read from contract env.
+				// Here we use weights for non native currency as worst case scenario, since we
+				// can't know whether it's native or not until we've already read from contract env.
 				let base_weight =
 					<T as orml_currencies::Config>::WeightInfo::transfer_non_native_currency();
 				env.charge_weight(base_weight.saturating_add(overhead_weight))?;
@@ -1077,12 +1078,10 @@ where
 				warn!("Calling get_coin_info() for: {:?}:{:?}", blockchain, symbol);
 
 				let result = match result {
-					Ok(coin_info) => {
-						Result::<CoinInfo, ChainExtensionError>::Ok(CoinInfo::from(coin_info))
-					},
-					Err(e) => {
-						Result::<CoinInfo, ChainExtensionError>::Err(ChainExtensionError::from(e))
-					},
+					Ok(coin_info) =>
+						Result::<CoinInfo, ChainExtensionError>::Ok(CoinInfo::from(coin_info)),
+					Err(e) =>
+						Result::<CoinInfo, ChainExtensionError>::Err(ChainExtensionError::from(e)),
 				};
 				env.write(&result.encode(), false, None).map_err(|_| {
 					DispatchError::Other("ChainExtension failed to call 'price feed'")
@@ -1090,7 +1089,7 @@ where
 			},
 			_ => {
 				error!("Called an unregistered `func_id`: {:}", func_id);
-				return Err(DispatchError::Other("Unimplemented func_id"));
+				return Err(DispatchError::Other("Unimplemented func_id"))
 			},
 		}
 
@@ -1423,7 +1422,7 @@ construct_runtime!(
 		VaultRewards: reward::{Pallet, Call, Storage, Event<T>} = 70,
 		VaultStaking: staking::{Pallet, Storage, Event<T>} = 71,
 
-		TokenAllowance: orml_currencies_allowance_extension::{Pallet, Storage, Call, Event<T>} = 80,
+		TokenAllowance: orml_currencies_allowance_extension::{Pallet, Storage, Config<T>, Call, Event<T>} = 80,
 
 		Farming: farming::{Pallet, Call, Storage, Event<T>} = 90,
 

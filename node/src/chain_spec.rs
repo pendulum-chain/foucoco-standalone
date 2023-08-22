@@ -402,5 +402,8 @@ fn testnet_genesis(
 			batching_api: b"https://dia-00.pendulumchain.tech/currencies".to_vec(),
 			coin_infos_map: vec![],
 		},
+		token_allowance: foucoco_standalone_runtime::TokenAllowanceConfig {
+			allowed_currencies: vec![CurrencyId::Native, CurrencyId::XCM(0), CurrencyId::XCM(1)],
+		},
 	}
 }
