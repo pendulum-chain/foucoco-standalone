@@ -90,7 +90,7 @@ pub fn development_config() -> ChainSpec {
 		.collect();
 	signatories.sort();
 
-	let sudo_account = pallet_multisig::Pallet::<Runtime>::multi_account_id(&signatories[..], 3);
+	let sudo_account = get_account_id_from_seed::<sr25519::Public>("AltoParaíso"); //pallet_multisig::Pallet::<Runtime>::multi_account_id(&signatories[..], 3);
 
 	let offchain_worker_price_feeder = AccountId::from_ss58check(OFF_CHAIN_WORKER_ADDRESS).unwrap();
 
@@ -133,7 +133,7 @@ pub fn development_config() -> ChainSpec {
 		// Fork ID
 		None,
 		// Properties
-		None,
+		Some(properties),
 		// Extensions
 		None,
 	)
@@ -194,7 +194,7 @@ pub fn local_testnet_config() -> ChainSpec {
 		// Fork ID
 		None,
 		// Properties
-		None,
+		Some(properties),
 		// Extensions
 		None,
 	)

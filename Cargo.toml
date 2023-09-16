@@ -13,6 +13,26 @@ panic = 'unwind'
 [patch."https://github.com/open-web3-stack/open-runtime-module-library"]
 orml-traits = { git = "https://github.com/open-web3-stack//open-runtime-module-library", branch = "polkadot-v0.9.40" }
 
+[patch."https://github.com/paritytech/substrate"]
+pallet-contracts = { git = "https://github.com/pendulum-chain/substrate", branch = "1-add-advance-block-feature-for-pallet-contracts-1" }
+
+[patch."https://github.com/pendulum-chain/substrate"]
+frame-benchmarking = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+frame-support = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+frame-system = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+pallet-contracts-primitives = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+pallet-contracts-proc-macro = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+sp-api = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+sp-core = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+sp-io = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+sp-runtime = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+sp-std = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+pallet-balances = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+pallet-timestamp = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+pallet-insecure-randomness-collective-flip = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+pallet-utility = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+sp-keystore = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
+
 # need this because of bifrost farming dependency in runtime
 # bifrost uses :
 # orml packages { version = "0.4.1-dev" }
