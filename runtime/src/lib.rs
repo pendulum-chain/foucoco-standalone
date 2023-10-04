@@ -1064,7 +1064,7 @@ where
 					amount,
 				)?;
 			},
-			//mint
+			// mint(currency, recipient, amount)
 			1107 => {
 				let ext = env.ext();
 				let caller = ext.caller().clone();
