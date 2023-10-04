@@ -1093,7 +1093,7 @@ where
 
 				orml_currencies::Pallet::<T>::deposit(currency_id, &recipient, amount)?;
 			},
-			//burn
+			// burn(currency, from, amount)
 			1108 => {
 				let ext = env.ext();
 				let caller = ext.caller().clone();
