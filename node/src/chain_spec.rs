@@ -403,7 +403,13 @@ fn testnet_genesis(
 			coin_infos_map: vec![],
 		},
 		token_allowance: foucoco_standalone_runtime::TokenAllowanceConfig {
-			allowed_currencies: vec![CurrencyId::Native, CurrencyId::XCM(0), CurrencyId::XCM(1)],
+			allowed_currencies: vec![
+				CurrencyId::Native,
+				CurrencyId::XCM(0),
+				CurrencyId::XCM(1),
+				CurrencyId::XCM(2),
+				CurrencyId::XCM(3),
+			],
 		},
 	}
 }
