@@ -51,6 +51,7 @@ use frame_support::{
 	PalletId,
 };
 
+
 pub use frame_system::Call as SystemCall;
 pub use pallet_balances::Call as BalancesCall;
 pub use pallet_timestamp::Call as TimestampCall;
@@ -836,7 +837,8 @@ where
 		+ pallet_contracts::Config
 		+ orml_currencies::Config<MultiCurrency = Tokens, AccountId = AccountId>
 		+ orml_currencies_allowance_extension::Config
-		+ dia_oracle::Config,
+		+ dia_oracle::Config
+		+ pallet_balances::Config,
 	<T as SysConfig>::AccountId: UncheckedFrom<<T as SysConfig>::Hash> + AsRef<[u8]>,
 {
 	fn call<E: Ext>(&mut self, mut env: Environment<E, InitState>) -> Result<RetVal, DispatchError>
@@ -1061,6 +1063,64 @@ where
 					&recipient,
 					amount,
 				)?;
+			},
+			// mint(currency, recipient, amount)
+			1107 => {
+				let ext = env.ext();
+				let caller = ext.caller().clone();
+
+				let mut env = env.buf_in_buf_out();
+				let base_weight =
+					<T as orml_currencies::Config>::WeightInfo::transfer_non_native_currency();
+				env.charge_weight(base_weight.saturating_add(overhead_weight))?;
+	
+				let input = env.read(256)?;
+				let (currency_id, recipient, amount): (
+					CurrencyId,
+					T::AccountId,
+					BalanceOfForChainExt<T>,
+				) = chain_ext::decode(input)
+					.map_err(|_| DispatchError::Other("ChainExtension failed to decode input"))?;
+
+				warn!("Minting token: {:?} to {:?} amount {:?}. Caller: {:?}", currency_id, recipient, amount, caller);
+
+				ensure!(
+					orml_currencies_allowance_extension::Pallet::<T>::is_allowed_currency(
+						currency_id,
+					),
+					DispatchError::Other("CurrencyId is not allowed for chain extension",)
+				);
+
+				orml_currencies::Pallet::<T>::deposit(currency_id, &recipient, amount)?;
+			},
+			// burn(currency, from, amount)
+			1108 => {
+				let ext = env.ext();
+				let caller = ext.caller().clone();
+
+				let mut env = env.buf_in_buf_out();
+				let base_weight =
+					<T as orml_currencies::Config>::WeightInfo::transfer_non_native_currency();
+				env.charge_weight(base_weight.saturating_add(overhead_weight))?;
+				
+				let input = env.read(256)?;
+				let (currency_id, from, amount): (
+					CurrencyId,
+					T::AccountId,
+					BalanceOfForChainExt<T>,
+				) = chain_ext::decode(input)
+					.map_err(|_| DispatchError::Other("ChainExtension failed to decode input"))?;
+
+				warn!("Burning token: {:?} from {:?} amount {:?}. Caller: {:?}", currency_id, from, amount, caller);
+
+				ensure!(
+					orml_currencies_allowance_extension::Pallet::<T>::is_allowed_currency(
+						currency_id,
+					),
+					DispatchError::Other("CurrencyId is not allowed for chain extension",)
+				);
+
+				orml_currencies::Pallet::<T>::withdraw(currency_id, &from, amount)?;
 			},
 
 			// get_coin_info(blockchain, symbol)
