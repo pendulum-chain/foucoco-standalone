@@ -14,7 +14,7 @@ pub const INITIAL_ISSUANCE: Balance = 200_000_000 * UNIT;
 
 pub const INITIAL_ISSUANCE_PER_SIGNATORY: Balance = 200 * UNIT;
 
-pub const ENDOWED_ACCOUNTS_BALANCE: Balance = 10_000 * UNIT;
+pub const ENDOWED_ACCOUNTS_BALANCE: Balance = 1_000_000 * UNIT;
 
 pub const OFF_CHAIN_WORKER_ADDRESS: &str = "6m69vWMouLarYCbJGJisVaDDpfNGETkD5hsDWf2T7osW4Cn1";
 
@@ -236,7 +236,7 @@ fn testnet_genesis(
 
 	let token_balances = balances
 		.iter()
-		.flat_map(|k| vec![(k.0.clone(), XCM(0), u128::pow(10, 18))])
+		.flat_map(|k| vec![(k.0.clone(), XCM(0), u128::pow(10, 20))])
 		.collect();
 
 	GenesisConfig {
@@ -409,6 +409,13 @@ fn testnet_genesis(
 				CurrencyId::XCM(1),
 				CurrencyId::XCM(2),
 				CurrencyId::XCM(3),
+				CurrencyId::XCM(4),
+				CurrencyId::XCM(5),
+				CurrencyId::XCM(6),
+				CurrencyId::XCM(7),
+				CurrencyId::XCM(8),
+				CurrencyId::XCM(9),
+				CurrencyId::XCM(10),
 			],
 		},
 	}
