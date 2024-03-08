@@ -51,7 +51,6 @@ use frame_support::{
 	PalletId,
 };
 
-
 pub use frame_system::Call as SystemCall;
 pub use pallet_balances::Call as BalancesCall;
 pub use pallet_timestamp::Call as TimestampCall;
@@ -266,9 +265,13 @@ const AVERAGE_ON_INITIALIZE_RATIO: Perbill = Perbill::from_percent(10);
 /// `Operational` extrinsics.
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
 
-/// We allow for 2 seconds of compute with a 6 second average block time, with maximum proof size.
+// cumulus_primitives_core::relay_chain::MAX_POV_SIZE is defined as 5 * 1024 * 1024
+const MAX_POV_SIZE: u32 = 5 * 1024 * 1024;
+
+/// We allow for 0.5 seconds of compute with the maximum proof size of a parachain block
 const MAXIMUM_BLOCK_WEIGHT: Weight =
-	Weight::from_parts(WEIGHT_REF_TIME_PER_SECOND.saturating_mul(2), u64::MAX);
+	Weight::from_parts(WEIGHT_REF_TIME_PER_SECOND.saturating_div(2), 0)
+		.set_proof_size(MAX_POV_SIZE as u64);
 
 /// The version information used to identify this runtime when compiled natively.
 #[cfg(feature = "std")]
@@ -1073,7 +1076,7 @@ where
 				let base_weight =
 					<T as orml_currencies::Config>::WeightInfo::transfer_non_native_currency();
 				env.charge_weight(base_weight.saturating_add(overhead_weight))?;
-	
+
 				let input = env.read(256)?;
 				let (currency_id, recipient, amount): (
 					CurrencyId,
@@ -1082,7 +1085,10 @@ where
 				) = chain_ext::decode(input)
 					.map_err(|_| DispatchError::Other("ChainExtension failed to decode input"))?;
 
-				warn!("Minting token: {:?} to {:?} amount {:?}. Caller: {:?}", currency_id, recipient, amount, caller);
+				warn!(
+					"Minting token: {:?} to {:?} amount {:?}. Caller: {:?}",
+					currency_id, recipient, amount, caller
+				);
 
 				ensure!(
 					orml_currencies_allowance_extension::Pallet::<T>::is_allowed_currency(
@@ -1102,7 +1108,7 @@ where
 				let base_weight =
 					<T as orml_currencies::Config>::WeightInfo::transfer_non_native_currency();
 				env.charge_weight(base_weight.saturating_add(overhead_weight))?;
-				
+
 				let input = env.read(256)?;
 				let (currency_id, from, amount): (
 					CurrencyId,
@@ -1111,7 +1117,10 @@ where
 				) = chain_ext::decode(input)
 					.map_err(|_| DispatchError::Other("ChainExtension failed to decode input"))?;
 
-				warn!("Burning token: {:?} from {:?} amount {:?}. Caller: {:?}", currency_id, from, amount, caller);
+				warn!(
+					"Burning token: {:?} from {:?} amount {:?}. Caller: {:?}",
+					currency_id, from, amount, caller
+				);
 
 				ensure!(
 					orml_currencies_allowance_extension::Pallet::<T>::is_allowed_currency(
