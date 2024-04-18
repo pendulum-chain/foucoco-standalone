@@ -257,6 +257,7 @@ fn testnet_genesis(
 			members: signatories.clone(),
 			..Default::default()
 		},
+		parachain_info: foucoco_standalone_runtime::ParachainInfoConfig { parachain_id: 2124.into() },
 		tokens: foucoco_standalone_runtime::TokensConfig {
 			// Configure the initial token supply for the native currency and USDC asset
 			balances: token_balances,
