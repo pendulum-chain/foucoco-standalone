@@ -4939,7 +4939,7 @@ dependencies = [
 [[package]]
 name = "pallet-contracts"
 version = "4.0.0-dev"
-source = "git+https://github.com/pendulum-chain/substrate?branch=1-add-advance-block-feature-for-pallet-contracts-1#cd21bfd7f1304de050713cb9b3ba0bee8a181c94"
+source = "git+https://github.com/pendulum-chain/substrate?branch=experiment-add-advance-block-feature-for-pallet-contracts#c677b21af8cb364d0f604a67871c4cfab750ead4"
 dependencies = [
  "bitflags",
  "environmental",
