@@ -14,7 +14,7 @@ panic = 'unwind'
 orml-traits = { git = "https://github.com/open-web3-stack//open-runtime-module-library", branch = "polkadot-v0.9.40" }
 
 [patch."https://github.com/paritytech/substrate"]
-pallet-contracts = { git = "https://github.com/pendulum-chain/substrate", branch = "1-add-advance-block-feature-for-pallet-contracts-1" }
+pallet-contracts = { git = "https://github.com/pendulum-chain/substrate", branch = "experiment-add-advance-block-feature-for-pallet-contracts" }
 
 [patch."https://github.com/pendulum-chain/substrate"]
 frame-benchmarking = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.40" }
